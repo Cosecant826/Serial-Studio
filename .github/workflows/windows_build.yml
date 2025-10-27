@@ -1,0 +1,185 @@
+#
+# Serial Studio
+# https://serial-studio.com/
+#
+# Copyright (C) 2020–2025 Alex Spataru
+#
+# This file is dual-licensed:
+#
+# - Under the GNU GPLv3 (or later) for builds that exclude Pro modules.
+# - Under the Serial Studio Commercial License for builds that include
+#   any Pro functionality.
+#
+# You must comply with the terms of one of these licenses, depending
+# on your use case.
+#
+# For GPL terms, see <https://www.gnu.org/licenses/gpl-3.0.html>
+# For commercial terms, see LICENSE_COMMERCIAL.md in the project root.
+#
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-SerialStudio-Commercial
+#
+
+name: Windows Build and Release
+
+on:
+  push:
+    paths-ignore:
+    - '**.md'
+  pull_request:
+    paths-ignore:
+    - '**.md'
+
+env:
+  VERSION: "3.1.10"
+  QT_VERSION_WINDOWS: 6.9.3
+  EXECUTABLE: "Serial-Studio"
+  APPLICATION: "Serial Studio"
+  PUBLISHER: "Alex Spataru"
+  DESCRIPTION: "Multi-purpose serial data visualization & processing program"
+
+jobs:
+
+#-------------------------------------------------------------------------------
+# Windows build (MSVC 2022 x86_64)
+#-------------------------------------------------------------------------------
+
+  build-windows:
+    runs-on: windows-latest
+    name: '🧊 Windows'
+    steps:
+    - run: git config --global core.autocrlf input
+    - name: '🧰 Checkout'
+      uses: actions/checkout@v4
+
+    - name: '⚙️ Install Qt6 with jurplel/install-qt-action'
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.9.3'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2022_64'
+        modules: 'qtshadertools qtquick3d qtgraphs qtmultimedia qtpositioning qtconnectivity qtserialport qtwebsockets'
+
+    - name: '⚙️ Install CMake'
+      uses: lukka/get-cmake@latest
+      with:
+        useLocalCache: true
+
+    - name: '🛠 Setup MSVC Development Environment'
+      uses: TheMrMilchmann/setup-msvc-dev@v3
+      with:
+        arch: x64
+
+    - name: '🚧 Configure with CMake'
+      env:
+        ARCGIS_API_KEY: ${{secrets.ARCGIS_API_KEY}}
+        SERIAL_STUDIO_LICENSE_KEY: ${{secrets.SERIAL_STUDIO_LICENSE_KEY}}
+        SERIAL_STUDIO_INSTANCE_ID: ${{secrets.SERIAL_STUDIO_INSTANCE_ID}}
+      run: |
+        mkdir build
+        cd build
+        cmake ../ -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER=cl -DPRODUCTION_OPTIMIZATION=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_COMMERCIAL=OFF -DBUILD_GPL3=ON
+
+    - name: '🚧 Build application'
+      run: |
+        cd build
+        cmake --build . --config Release -j 16
+
+    - name: '⚙️ Add msbuild to PATH'
+      uses: microsoft/setup-msbuild@v2
+
+    - name: '⚙️ Install WiX'
+      run: dotnet tool install --global wix
+
+    - name: '📦 Create MSI installer'
+      run: |
+        cd build
+        cpack --verbose
+        mv *.msi ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi
+        mv ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi ../
+
+    - name: '📦 Create portable TGZ'
+      run: |
+        cd build
+        cpack -G TGZ
+        mv *.tar.gz ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tgz
+
+    - name: '📦 Extract TGZ contents'
+      shell: bash
+      run: |
+        cd build
+        7z x ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tgz
+        7z x ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tar
+        DIRNAME=$(tar -tf ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tar | head -1 | cut -f1 -d"/")
+        echo $DIRNAME > dirname.txt
+        cp ../app/deploy/windows/license.rtf ./License.rtf
+
+    - name: '📝 Create Windows batch launcher'
+      shell: bash
+      run: |
+        cd build
+        DIRNAME=$(cat dirname.txt)
+        echo "@echo off" > "${{env.APPLICATION}}.bat"
+        echo "start \"\" \"%~dp0${DIRNAME}\\bin\\${{env.EXECUTABLE}}.exe\"" >> "${{env.APPLICATION}}.bat"
+
+    - name: '📦 Add files to ZIP'
+      shell: bash
+      run: |
+        cd build
+        DIRNAME=$(cat dirname.txt)
+        7z a ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip "${{env.APPLICATION}}.bat" License.rtf $DIRNAME/*
+        mv ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip ..
+
+    - name: '📤 Upload artifact: MSI installer'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi
+        path: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi
+
+    - name: '📤 Upload artifact: Portable ZIP'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable
+        path: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip
+
+#-------------------------------------------------------------------------------
+# Create release
+#-------------------------------------------------------------------------------
+
+  upload:
+    name: '🗂 Create release and upload artifacts'
+    needs:
+      - build-windows
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.ref_name || 'continuous' }}
+
+    steps:
+      - name: '📥 Download artifacts'
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: '🗑️ Delete previous release and tag if exists'
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "Release '$RELEASE_TAG' exists. Deleting..."
+            gh release delete "$RELEASE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || echo "Failed to delete release. Ignoring."
+          else
+            echo "No release named '$RELEASE_TAG' found. Skipping delete."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: '🚀 Create Release'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_TAG }}
+          prerelease: true
+          allowUpdates: true
+          replacesArtifacts: true
+          name: 'Windows Build'
+          artifacts: |
+            artifacts/*.msi
+            artifacts/*.zip
