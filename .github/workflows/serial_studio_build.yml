@@ -1,0 +1,268 @@
+#
+# Serial Studio
+# https://serial-studio.com/
+#
+# Copyright (C) 2020–2025 Alex Spataru
+#
+# This file is dual-licensed:
+#
+# - Under the GNU GPLv3 (or later) for builds that exclude Pro modules.
+# - Under the Serial Studio Commercial License for builds that include
+#   any Pro functionality.
+#
+# You must comply with the terms of one of these licenses, depending
+# on your use case.
+#
+# For GPL terms, see <https://www.gnu.org/licenses/gpl-3.0.html>
+# For commercial terms, see LICENSE_COMMERCIAL.md in the project root.
+#
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-SerialStudio-Commercial
+#
+
+# ============================================================================
+# GitHub Actions 工作流: Windows 构建和发布
+# ============================================================================
+name: Windows Build and Release
+
+# 触发条件配置
+on:
+  push:
+    # 当代码推送时触发,但忽略所有 Markdown 文件的更改
+    paths-ignore:
+    - '**.md'
+  pull_request:
+    # 当创建 PR 时触发,同样忽略 Markdown 文件
+    paths-ignore:
+    - '**.md'
+
+# 全局环境变量,在所有 job 和 step 中都可以使用
+env:
+  VERSION: "3.1.10"                      # 应用程序版本号
+  QT_VERSION_WINDOWS: 6.9.3              # Windows 平台使用的 Qt 版本
+  EXECUTABLE: "Serial-Studio"            # 可执行文件名称(不含扩展名)
+  APPLICATION: "Serial Studio"           # 应用程序显示名称(含空格)
+  PUBLISHER: "Alex Spataru"              # 发布者名称
+  DESCRIPTION: "Multi-purpose serial data visualization & processing program"  # 应用程序描述
+
+jobs:
+
+#-------------------------------------------------------------------------------
+# Windows 构建任务 (使用 MSVC 2022 编译器, x86_64 架构)
+#-------------------------------------------------------------------------------
+
+  build-windows:
+    runs-on: windows-latest              # 使用最新的 Windows runner
+    name: '🧊 Windows'                   # 在 GitHub Actions UI 中显示的任务名称
+    steps:
+    # 配置 Git 换行符处理:input 模式确保检出时不转换换行符
+    # 这对于跨平台项目很重要,避免 CRLF/LF 混乱
+    - run: git config --global core.autocrlf input
+    
+    # 检出代码仓库到 runner 工作目录
+    - name: '🧰 Checkout'
+      uses: actions/checkout@v4
+
+    # 安装 Qt 6.9.3 框架及必要的模块
+    - name: '⚙️ Install Qt6 with jurplel/install-qt-action'
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.9.3'                                      # Qt 版本
+        host: 'windows'                                       # 主机平台
+        target: 'desktop'                                     # 目标平台(桌面应用)
+        arch: 'win64_msvc2022_64'                            # 架构:64位 Windows,MSVC 2022 编译器
+        # 需要安装的 Qt 模块列表
+        modules: 'qtshadertools qtquick3d qtgraphs qtmultimedia qtpositioning qtconnectivity qtserialport qtwebsockets'
+        # qtshadertools  - 着色器工具
+        # qtquick3d      - 3D 图形支持
+        # qtgraphs       - 图表组件
+        # qtmultimedia   - 多媒体功能
+        # qtpositioning  - 定位服务
+        # qtconnectivity - 蓝牙和 NFC 连接
+        # qtserialport   - 串口通信(核心功能)
+        # qtwebsockets   - WebSocket 通信
+
+    # 安装最新版本的 CMake 构建工具
+    - name: '⚙️ Install CMake'
+      uses: lukka/get-cmake@latest
+      with:
+        useLocalCache: true                                   # 使用本地缓存加速安装
+
+    # 配置 MSVC 2022 开发环境(编译器、链接器等)
+    - name: '🛠 Setup MSVC Development Environment'
+      uses: TheMrMilchmann/setup-msvc-dev@v3
+      with:
+        arch: x64                                             # 目标架构:64 位
+
+    # 使用 CMake 配置构建系统
+    - name: '🚧 Configure with CMake'
+      env:
+        # 从 GitHub Secrets 中获取敏感信息
+        ARCGIS_API_KEY: ${{secrets.ARCGIS_API_KEY}}                           # ArcGIS 地图服务密钥
+        SERIAL_STUDIO_LICENSE_KEY: ${{secrets.SERIAL_STUDIO_LICENSE_KEY}}     # Serial Studio 许可证密钥
+        SERIAL_STUDIO_INSTANCE_ID: ${{secrets.SERIAL_STUDIO_INSTANCE_ID}}     # 实例标识符
+      run: |
+        mkdir build                                           # 创建构建目录
+        cd build
+        # CMake 配置参数说明:
+        # -DCMAKE_CXX_COMPILER=cl          - 使用 MSVC C++ 编译器
+        # -DCMAKE_C_COMPILER=cl            - 使用 MSVC C 编译器
+        # -DPRODUCTION_OPTIMIZATION=ON     - 启用生产环境优化
+        # -DCMAKE_BUILD_TYPE=Release       - 发布版本(优化代码,无调试信息)
+        # -DBUILD_COMMERCIAL=OFF           - 不构建商业版本
+        # -DBUILD_GPL3=ON                  - 构建 GPL3 开源版本
+        cmake ../ -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER=cl -DPRODUCTION_OPTIMIZATION=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_COMMERCIAL=OFF -DBUILD_GPL3=ON
+
+    # 编译应用程序
+    - name: '🚧 Build application'
+      run: |
+        cd build
+        # --config Release  - 使用 Release 配置
+        # -j 16            - 并行编译,使用 16 个线程加速
+        cmake --build . --config Release -j 16
+
+    # 将 MSBuild 添加到系统 PATH(虽然此处未直接使用,但某些依赖可能需要)
+    - name: '⚙️ Add msbuild to PATH'
+      uses: microsoft/setup-msbuild@v2
+
+    # 安装 WiX Toolset,用于创建 Windows 安装程序(.msi)
+    # 安装 WiX Toolset,用于创建 Windows 安装程序(.msi)
+    - name: '⚙️ Install WiX'
+      run: dotnet tool install --global wix
+
+    # 使用 CPack 打包生成 MSI 安装程序
+    - name: '📦 Create MSI installer'
+      run: |
+        cd build
+        cpack --verbose                                       # 详细输出打包过程
+        # 重命名 MSI 文件为规范格式: Serial-Studio-3.1.10-Windows.msi
+        mv *.msi ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi
+        mv ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi ../
+
+    # 创建便携式版本的 TGZ 压缩包
+    - name: '📦 Create portable TGZ'
+      run: |
+        cd build
+        cpack -G TGZ                                          # 使用 TGZ 生成器打包
+        # 重命名为规范格式: Serial-Studio-3.1.10-Windows.tgz
+        mv *.tar.gz ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tgz
+
+    # 解压 TGZ 文件并准备便携式版本所需的文件
+    - name: '📦 Extract TGZ contents'
+      shell: bash                                             # 使用 bash shell 执行(Windows runner 上也可用)
+      run: |
+        cd build
+        # 第一次解压 .tgz 得到 .tar
+        7z x ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tgz
+        # 第二次解压 .tar 得到实际文件
+        7z x ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tar
+        # 从 tar 包中提取顶层目录名(通常是版本号相关的文件夹)
+        DIRNAME=$(tar -tf ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.tar | head -1 | cut -f1 -d"/")
+        # 将目录名保存到文件,供后续步骤使用
+        echo $DIRNAME > dirname.txt
+        # 复制许可证文件到构建目录
+        cp ../app/deploy/windows/license.rtf ./License.rtf
+
+    - name: '📝 Create Windows batch launcher'
+      shell: bash
+      run: |
+        cd build
+        DIRNAME=$(cat dirname.txt)
+        echo "@echo off" > "${{env.APPLICATION}}.bat"
+        echo "start \"\" \"%~dp0${DIRNAME}\\bin\\${{env.EXECUTABLE}}.exe\"" >> "${{env.APPLICATION}}.bat"
+
+    - name: '📦 Add files to ZIP'
+      shell: bash
+      run: |
+        cd build
+        DIRNAME=$(cat dirname.txt)                            # 读取目录名
+        # 使用 7z 创建 ZIP,包含:
+        # 1. 启动脚本 (Serial Studio.bat)
+        # 2. 许可证文件 (License.rtf)
+        # 3. 程序目录及其所有内容
+        7z a ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip "${{env.APPLICATION}}.bat" License.rtf $DIRNAME/*
+        # 移动到上级目录
+        mv ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip ../
+
+    # 上传 MSI 安装程序作为 GitHub Actions 构建产物
+    - name: '📤 Upload artifact: MSI installer'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi     # 产物名称
+        path: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows.msi     # 文件路径
+
+    # 上传便携式 ZIP 压缩包作为 GitHub Actions 构建产物
+    - name: '📤 Upload artifact: Portable ZIP'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable
+        path: ${{env.EXECUTABLE}}-${{env.VERSION}}-Windows-Portable.zip
+
+#-------------------------------------------------------------------------------
+# 创建 GitHub Release 并上传制品
+#-------------------------------------------------------------------------------
+
+  upload:
+    name: '🗂 Create release and upload artifacts'
+    needs:
+      - build-windows                                         # 依赖 build-windows 任务完成
+    runs-on: ubuntu-latest                                    # 在 Ubuntu runner 上执行
+    env:
+      # 动态确定发布标签:
+      # - 如果是 tag push,使用 tag 名称
+      # - 否则使用 'continuous' 作为持续构建标签
+      RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.ref_name || 'continuous' }}
+#-------------------------------------------------------------------------------
+# Create release
+#-------------------------------------------------------------------------------
+
+  upload:
+    name: '🗂 Create release and upload artifacts'
+    needs:
+      - build-windows
+    runs-on: ubuntu-latest
+    env:
+      # 动态确定发布标签:
+      # - 如果是 tag push,使用 tag 名称
+      # - 否则使用 'continuous' 作为持续构建标签
+      RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.ref_name || 'continuous' }}
+
+    steps:
+      # 下载之前步骤上传的所有构建产物
+      - name: '📥 Download artifacts'
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts                                   # 下载到 artifacts 目录
+          merge-multiple: true                                # 合并多个产物到同一目录
+
+      # 删除已存在的同名 Release(如果有),避免冲突
+      - name: '🗑️ Delete previous release and tag if exists'
+        run: |
+          # 使用 GitHub CLI 检查 Release 是否存在
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "Release '$RELEASE_TAG' exists. Deleting..."
+            # 删除 Release 及其关联的 tag
+            # --cleanup-tag: 同时删除 git tag
+            # --yes: 自动确认,不提示
+            # || echo: 如果删除失败则忽略错误继续执行
+            gh release delete "$RELEASE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || echo "Failed to delete release. Ignoring."
+          else
+            echo "No release named '$RELEASE_TAG' found. Skipping delete."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}           # 使用 GitHub 提供的自动 token
+
+      # 创建新的 GitHub Release 并上传制品
+      - name: '🚀 Create Release'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_TAG }}                         # 使用动态标签
+          prerelease: true                                    # 标记为预发布版本
+          allowUpdates: true                                  # 允许更新已存在的 Release
+          replacesArtifacts: true                             # 替换同名的制品文件
+          name: 'Windows Build'                            # Release 显示名称
+          # 上传的文件(支持通配符):
+          # - 所有 .msi 安装程序
+          # - 所有 .zip 便携式压缩包
+          artifacts: |
+            artifacts/*.msi
+            artifacts/*.zip
