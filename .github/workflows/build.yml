@@ -1,0 +1,407 @@
+#
+# Serial Studio — GPLv3 Community Build
+# https://serial-studio.com/
+#
+# Copyright (C) 2020–2025 Alex Spataru
+#
+# This workflow builds the GPLv3-only release artifacts across all platforms.
+# No commercial secrets or licenses are required.
+#
+# SPDX-License-Identifier: GPL-3.0-only
+#
+
+name: 'GPL Build'
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+#===============================================================================
+# Environment
+#===============================================================================
+
+env:
+  VERSION: '3.2.7'
+  QT_VERSION: '6.8.2'
+
+  # GPL branding (set by CMake when BUILD_GPL3=ON)
+  UNIXNAME: 'serial-studio-gpl3'
+  EXECUTABLE: 'Serial-Studio-GPL3'
+  APPLICATION: 'Serial Studio GPLv3'
+  DESCRIPTION: 'Multi-purpose serial data visualization & processing program'
+
+  QML_DIR: '../../app/qml'
+
+  # Excluded AppImage libraries
+  LINUXDEPLOY_EXCLUDED_LIBRARIES: >-
+    libmysqlclient.so*;libqsqlmimer.so;libqsqlmysql.so;libqsqlodbc.so;
+    libqsqlpsql.so;libqsqloci.so;libqsqldb2.so;libqsqlibase.so
+
+#===============================================================================
+# Jobs
+#===============================================================================
+
+jobs:
+
+  #----------------------------------------------------------------------------
+  # Linux (x86_64) — AppImage
+  #----------------------------------------------------------------------------
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    name: 'Linux (x86_64)'
+
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+
+      - name: 'Install system dependencies'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            fakeroot \
+            libcups2-dev \
+            libegl1 \
+            libfuse2 \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            libudev-dev \
+            libsecret-1-dev \
+            libzstd-dev \
+            zlib1g-dev \
+            libexpat1-dev \
+            libminizip-dev \
+            libopus-dev \
+            rpm \
+            libxcb1 \
+            libxcb-cursor0 \
+            libxcb-cursor-dev \
+            libxcb-glx0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-image0-dev \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-shm0 \
+            libxcb-sync1 \
+            libxcb-util0-dev \
+            libxcb-util1 \
+            libxcb-xfixes0 \
+            libxcb-xinerama0 \
+            libxcb-xkb-dev \
+            libxcb-xtest0 \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            libxkbcommon-x11-dev \
+            libpulse-dev \
+            libpipewire-0.3-0 \
+            libgstreamer1.0-0 \
+            libgstreamer-plugins-base1.0-0 \
+            libgstreamer-plugins-bad1.0-0 \
+            libgstreamer-plugins-good1.0-0 \
+            libgstreamer-gl1.0-0 \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            gstreamer1.0-tools \
+            gstreamer1.0-x \
+            gstreamer1.0-alsa \
+            gstreamer1.0-pulseaudio \
+            gstreamer1.0-gl
+
+      - name: 'Install Qt'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: 'linux'
+          target: 'desktop'
+          arch: 'gcc_64'
+          cache: true
+          modules: >-
+            qtgraphs
+            qtsvg
+            qtconnectivity
+            qtserialport
+            qt5compat
+            qtwebengine
+            qtmqtt
+            qtmultimedia
+            qtserialbus
+            qttools
+
+      - name: 'Install CMake'
+        uses: lukka/get-cmake@latest
+        with:
+          useLocalCache: true
+
+      - name: 'Configure (GPL, Release)'
+        run: |
+          cmake -B build -G 'Unix Makefiles' \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPRODUCTION_OPTIMIZATION=ON \
+            -DENABLE_HARDENING=ON \
+            -DBUILD_GPL3=ON \
+            -DBUILD_COMMERCIAL=OFF \
+            -DENABLE_GRPC=OFF
+
+      - name: 'Build'
+        run: cmake --build build --config Release -j$(nproc)
+
+      - name: 'Create AppImage'
+        run: |
+          cd build/app
+
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+
+          export QML_SOURCES_PATHS="${{ env.QML_DIR }}"
+
+          QT_PLUGINS_PATH="${{ env.QT_ROOT_DIR }}/plugins"
+          rm -f "$QT_PLUGINS_PATH/imageformats/libqtiff.so"
+
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            -e ${{ env.UNIXNAME }} \
+            -i ../../app/deploy/linux/${{ env.UNIXNAME }}.svg \
+            -d ../../app/deploy/linux/${{ env.UNIXNAME }}.desktop \
+            --plugin qt \
+            --output appimage
+
+          # Bundle canbus plugins
+          mkdir -p AppDir/usr/plugins/canbus
+          if [ -d "$QT_PLUGINS_PATH/canbus" ]; then
+            cp -r "$QT_PLUGINS_PATH/canbus/"* AppDir/usr/plugins/canbus/ || true
+          fi
+
+          # Bundle offscreen platform plugin
+          mkdir -p AppDir/usr/plugins/platforms
+          if [ -f "$QT_PLUGINS_PATH/platforms/libqoffscreen.so" ]; then
+            cp "$QT_PLUGINS_PATH/platforms/libqoffscreen.so" AppDir/usr/plugins/platforms/
+          fi
+
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+
+          rm -f linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+
+          mv *.AppImage ../../${{ env.EXECUTABLE }}-${{ env.VERSION }}-Linux-x64.AppImage
+
+      - name: 'Upload AppImage'
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.EXECUTABLE }}-${{ env.VERSION }}-Linux-x64.AppImage
+          path: ${{ env.EXECUTABLE }}-${{ env.VERSION }}-Linux-x64.AppImage
+
+  #----------------------------------------------------------------------------
+  # macOS (x86_64) — DMG
+  #----------------------------------------------------------------------------
+
+  build-macos:
+    runs-on: macos-latest
+    name: 'macOS (x86_64)'
+
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+
+      - name: 'Install Qt'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: 'mac'
+          target: 'desktop'
+          arch: 'clang_64'
+          cache: true
+          modules: >-
+            qtgraphs
+            qtsvg
+            qtconnectivity
+            qtserialport
+            qt5compat
+            qtwebengine
+            qtmqtt
+            qtmultimedia
+            qtserialbus
+            qttools
+
+      - name: 'Install CMake'
+        uses: lukka/get-cmake@latest
+        with:
+          useLocalCache: true
+
+      - name: 'Configure (GPL, Release)'
+        run: |
+          cmake -B build -G 'Unix Makefiles' \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPRODUCTION_OPTIMIZATION=ON \
+            -DENABLE_HARDENING=ON \
+            -DBUILD_GPL3=ON \
+            -DBUILD_COMMERCIAL=OFF \
+            -DENABLE_GRPC=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64"
+
+      - name: 'Build'
+        run: cmake --build build --config Release -j$(sysctl -n hw.logicalcpu)
+
+      - name: 'Package (CPack)'
+        run: |
+          cd build
+          cpack --verbose
+
+      - name: 'Mount DMG and copy .app'
+        run: |
+          VOLUME=$(yes | hdiutil attach ./build/*.dmg -nobrowse | grep 'Volumes' | awk '{print $3}')
+          cp -a "$VOLUME/${{ env.EXECUTABLE }}.app" "${{ env.APPLICATION }}.app"
+          hdiutil detach "$VOLUME"
+
+      - name: 'Bundle offscreen plugin'
+        run: |
+          QT_PLUGINS_PATH="${{ env.QT_ROOT_DIR }}/plugins"
+          DEST="${{ env.APPLICATION }}.app/Contents/PlugIns/platforms"
+          mkdir -p "$DEST"
+          if [ -f "$QT_PLUGINS_PATH/platforms/libqoffscreen.dylib" ]; then
+            cp "$QT_PLUGINS_PATH/platforms/libqoffscreen.dylib" "$DEST/"
+          fi
+
+      - name: 'Create DMG'
+        run: |
+          npm install --global create-dmg
+          create-dmg "${{ env.APPLICATION }}.app" --dmg-title="${{ env.APPLICATION }}"
+          mv "${{ env.APPLICATION }} ${{ env.VERSION }}.dmg" \
+             "${{ env.EXECUTABLE }}-${{ env.VERSION }}-macOS-x64.dmg"
+
+      - name: 'Upload DMG'
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.EXECUTABLE }}-${{ env.VERSION }}-macOS-x64.dmg
+          path: ${{ env.EXECUTABLE }}-${{ env.VERSION }}-macOS-x64.dmg
+
+  #----------------------------------------------------------------------------
+  # Windows (x86_64) — Portable ZIP
+  #----------------------------------------------------------------------------
+
+  build-windows:
+    runs-on: windows-latest
+    name: 'Windows (x86_64)'
+
+    steps:
+      - run: git config --global core.autocrlf input
+
+      - name: 'Checkout'
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+
+      - name: 'Install Qt'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: true
+          modules: >-
+            qtgraphs
+            qtsvg
+            qtconnectivity
+            qtserialport
+            qt5compat
+            qtwebengine
+            qtmqtt
+            qtmultimedia
+            qtserialbus
+            qttools
+
+      - name: 'Install CMake'
+        uses: lukka/get-cmake@latest
+        with:
+          useLocalCache: false
+          useCloudCache: false
+
+      - name: 'Setup MSVC'
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: 'Configure (GPL, Release)'
+        run: |
+          cmake -B build -G 'Ninja' `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DPRODUCTION_OPTIMIZATION=ON `
+            -DENABLE_HARDENING=ON `
+            -DBUILD_GPL3=ON `
+            -DBUILD_COMMERCIAL=OFF `
+            -DENABLE_GRPC=OFF
+
+      - name: 'Build'
+        run: cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: 'Add msbuild to PATH'
+        uses: microsoft/setup-msbuild@v3
+
+      - name: 'Create portable TGZ (CPack)'
+        shell: bash
+        run: |
+          cd build
+          cpack -G TGZ
+          mv *.tar.gz ../archive.tgz
+
+      - name: 'Extract TGZ'
+        shell: bash
+        run: |
+          cd build
+          7z x ../archive.tgz
+          7z x archive.tar
+          DIRNAME=$(tar -tf archive.tar 2>/dev/null | head -1 | cut -f1 -d"/" || true)
+          echo "$DIRNAME" > dirname.txt
+
+      - name: 'Bundle offscreen plugin'
+        shell: bash
+        run: |
+          cd build
+          DIRNAME=$(cat dirname.txt)
+          QT_PLUGINS_PATH="${{ env.QT_ROOT_DIR }}/plugins"
+          DEST="$DIRNAME/plugins/platforms"
+          mkdir -p "$DEST"
+          if [ -f "$QT_PLUGINS_PATH/platforms/qoffscreen.dll" ]; then
+            cp "$QT_PLUGINS_PATH/platforms/qoffscreen.dll" "$DEST/"
+          fi
+
+      - name: 'Create batch launcher'
+        shell: bash
+        run: |
+          cd build
+          DIRNAME=$(cat dirname.txt)
+          echo '@echo off' > "${{ env.APPLICATION }}.bat"
+          echo 'start "" "%~dp0'"$DIRNAME"'\bin\${{ env.EXECUTABLE }}.exe"' >> "${{ env.APPLICATION }}.bat"
+
+      - name: 'Create portable ZIP'
+        shell: bash
+        run: |
+          cd build
+          DIRNAME=$(cat dirname.txt)
+          7z a ${{ env.EXECUTABLE }}-${{ env.VERSION }}-Windows-Portable.zip \
+            "${{ env.APPLICATION }}.bat" "$DIRNAME"/*
+
+      - name: 'Upload portable ZIP'
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.EXECUTABLE }}-${{ env.VERSION }}-Windows-Portable
+          path: build/${{ env.EXECUTABLE }}-${{ env.VERSION }}-Windows-Portable.zip
